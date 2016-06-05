@@ -1,6 +1,6 @@
 # tor-privoxy-docker
 
-[![Current tag](http://img.shields.io/github/tag/gp3t1/tor-privoxy-docker.svg)](https://github.com/gp3t1/tor-privoxy-docker/tags) [![Repository issues](http://issuestats.com/github/gp3t1/tor-privoxy-docker/badge/issue)](http://issuestats.com/github/gp3t1/tor-privoxy-docker)
+[![0.1.0](http://img.shields.io/github/tag/gp3t1/tor-privoxy-docker.svg)](https://github.com/gp3t1/tor-privoxy-docker/tags) [![Repository issues](http://issuestats.com/github/gp3t1/tor-privoxy-docker/badge/issue)](http://issuestats.com/github/gp3t1/tor-privoxy-docker)
 
 HTTP+SOCKS5 Tor [proxy](https://www.torproject.org) (with [privoxy](https://www.privoxy.org/))
 
