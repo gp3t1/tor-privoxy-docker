@@ -1,0 +1,31 @@
+#!/bin/sh
+
+getStatus(){
+	CHECK_URL="https://check.torproject.org"
+	STATUS_PATTERN='<h1 class="(not|on|off)">[ ]*([^<])*'
+	CURL_OPTS="$*"
+	# printf "\nChecking Tor connectivity with: curl %s %s" "$CURL_OPTS" "$CHECK_URL"
+	status=$(curl -s $CURL_OPTS "$CHECK_URL" | tr -d '\n' | egrep -oi "$STATUS_PATTERN")
+	if test -z "$status"; then
+		printf "Cannot connect to %s with options: %s\n" "$CHECK_URL" "$CURL_OPTS"
+		return 1
+	else
+		printf "%s (curl %s %s)\n" "$(echo "$status" | awk -F '>' '{ gsub(/^[ \t]+/, "", $2); print $2 }')" "$CURL_OPTS" "$CHECK_URL"
+		class="$(echo "$status" | awk -F '"' '{ print $2 }')"
+		test -n "$class" -a "$class" != "off"
+		return $?
+	fi
+}
+
+if ! test -f /tmp/started; then
+	touch /tmp/started
+	sleep 5
+fi
+# getStatus
+getStatus "--socks5" "127.0.0.1:$SOCKS_PORT" || failed=true
+getStatus "--proxy" "http://127.0.0.1:$HTTP_PORT" || failed=true
+test $failed && exit 1
+
+tempo=$((RANDOM%60+180))
+printf "next check in %s s.\n" "$tempo"
+sleep $tempo

@@ -1,0 +1,246 @@
+#!/bin/sh
+export TOR_CONFIG="/etc/tor/torrc"
+export PRIVOXY_CONFIG="/etc/privoxy/config"
+export SUPERVISOR_CONFIG="/etc/supervisor/supervisord.conf"
+
+print_ipaddrs(){
+	IP_PROT=""
+	IFACE=""
+	formatv6=1
+	for arg in "$@"; do
+		case $arg in
+			-4|-6 )
+				IP_PROT="$arg"
+				;;
+			--format6 )
+				formatv6=0
+				;;
+			* )
+				IFACE="$arg"
+				;;
+		esac
+	done
+
+	IPS="$(ip -o $IP_PROT a show $IFACE | egrep ' inet[6]? ')"
+	echo "$IPS" | while read ip ; do
+  	addr=$(echo "$ip" | awk '{ print $4 }' | cut -d/ -f1)
+  	if test "$formatv6" -eq 0; then
+  		addr=$(echo "$addr" | sed -r 's|(.*:.*)|\[\1\]|')
+  	fi
+		echo "$addr"
+	done
+}
+
+accepted_sources(){
+	if test -n "$ACCEPT_FROM"; then
+		echo "$ACCEPT_FROM" | tr ';' '\n' | while read src; do
+    	if test -n "$src"; then
+    		echo "$src"
+    	fi
+		done
+	else
+		# printf "\n -------- calculating cidr IP4 network for: %s --------\n" "$1" 1>&2
+		mask=$(ip -o -4 a show $1 | sed -r 's|.*(/[0-9]+) .*|\1|')
+		# printf "\n -------- mask: %s --------\n" "$mask" 1>&2
+		addr=$(sipcalc $1 | grep 'Network address' | awk -F '- ' '{ print $2 }')
+		# printf "\n -------- addr: %s --------\n" "$addr" 1>&2
+		if test -n "$mask" -a -n "$addr"; then
+			echo "$addr$mask"
+		fi
+	fi
+}
+
+upgrade(){
+	if test "$REFRESH" ==  true; then
+		packages="curl sipcalc privoxy tor@testing"
+		printf "\n## Upgrading $packages:\n%s"
+		apk --no-cache add $packages
+	fi
+}
+
+printNetwork(){
+	if test "$VERBOSE" -gt 0; then
+		printf "\n## Local IP4 config:\n%s" "$(ip -o -4 a show)"
+		printf "\n## Local IP6 config:\n%s\n" "$(ip -o -6 a show)"
+	fi
+}
+
+config_tor(){
+	printf "\n## Set Tor Config..."
+	listen4=$(for addr in $(print_ipaddrs -4); do
+		echo "SOCKSPort $addr:$SOCKS_PORT"
+		echo "DNSPort $addr:$DNS_PORT"
+	done)
+	policies=$(
+		for addr in $(print_ipaddrs -4); do
+			echo "SOCKSPolicy accept $addr"
+		done
+		for addr in $(accepted_sources); do
+			echo "SOCKSPolicy accept $addr"
+		done
+		echo "SOCKSPolicy reject *"
+	)
+	log_cfg=$(
+		if test "$VERBOSE" -le 0; then
+			echo "TestSocks 0"
+			echo "Log notice stdout"
+		else
+			echo "TestSocks 1"
+			if test "$VERBOSE" -eq 1; then
+				echo "Log info stdout"
+			else
+				echo "Log debug stdout"
+			fi
+		fi)
+	ctrl=$(
+		if test -n "$TORCTRL_PASS"; then
+			echo "ControlPort $TORCTRL_PORT"
+			for addr in $(print_ipaddrs -4); do
+				echo "ControlListenAddress $addr"
+			done
+			echo "HashedControlPassword $(su - "$TOR_USER" -c "tor --hash-password $TORCTRL_PASS")"
+		else
+			echo "# No controller access configured"
+		fi
+	)
+	cat > "$TOR_CONFIG" <<-EOF
+	## SOCKS and DNS listening on:
+	$listen4
+	## Accepting requests from:
+	$policies
+	## Logs config:
+	$log_cfg
+	## Controller config:
+	$ctrl
+	AutomapHostsOnResolve 1
+	AutomapHostsSuffixes .exit,.onion
+
+	# see /etc/tor/torrc.sample for help
+	EOF
+	chmod -R ug+rwx /etc/tor
+	chown -R "${TOR_USER}:${TOR_USER}" /etc/tor /var/lib/tor /usr/share/tor
+	test -f "$TOR_CONFIG"
+}
+
+test_tor(){
+	su - "$TOR_USER" -c "tor -f $TOR_CONFIG --verify-config" 1>/dev/null 2>&1
+	if test $? -eq 0; then
+		printf "\nConfiguration valid"
+		return 0
+	else
+		printf "\nConfiguration invalid!\n"
+		cat "$TOR_CONFIG"
+		return 1
+	fi
+}
+
+config_privoxy(){
+	printf "\n## Set Privoxy Config..."
+	test -f "$PRIVOXY_CONFIG.sample" || cp "$PRIVOXY_CONFIG" "$PRIVOXY_CONFIG.sample"
+	listen4=$(for addr in $(print_ipaddrs -4); do
+		echo "listen-address  $addr:$HTTP_PORT"
+	done)
+	acls=$(
+		for addr in $(print_ipaddrs -4); do
+			echo "permit-access  $addr"
+		done
+		for addr in $(accepted_sources); do
+			echo "permit-access  $addr"
+		done
+	)
+	cat > "$PRIVOXY_CONFIG" <<-EOF
+	confdir /etc/privoxy
+	## Listening on:
+	$listen4
+	## Accepting requests from:
+	$acls
+	## Logs config:
+	logdir /var/log/privoxy
+	logfile privoxy.log
+	## TOR config:
+	forward-socks5t   /			127.0.0.1:$SOCKS_PORT .
+	## Local access:
+	#forward 	192.168.*.*/ 	.
+	#forward  10.*.*.*/     .
+	#forward  127.*.*.*/    .
+	#forward  localhost/    .
+	actionsfile match-all.action
+	actionsfile default.action
+	actionsfile user.action
+	filterfile default.filter
+	filterfile user.filter
+	toggle  1
+	enable-remote-toggle  0
+	enable-remote-http-toggle  0
+	enable-edit-actions 0
+	enforce-blocks 0
+	buffer-limit 4096
+	enable-proxy-authentication-forwarding 0
+	forwarded-connect-retries  0
+	accept-intercepted-requests 0
+	allow-cgi-request-crunching 0
+	split-large-forms 0
+	keep-alive-timeout 5
+	tolerate-pipelining 1
+	socket-timeout 300
+
+	EOF
+	chown -R "${PRIVOXY_USER}:${PRIVOXY_USER}" /etc/privoxy
+	test -f "$PRIVOXY_CONFIG"
+}
+
+test_privoxy(){
+	su - "$PRIVOXY_USER" -c "privoxy --config-test $PRIVOXY_CONFIG"
+	if test $? -eq 0; then
+		printf "\nConfiguration valid\n"
+		return 0
+	else
+		printf "\nConfiguration invalid\n"
+			cat "$PRIVOXY_CONFIG"
+		return 1
+	fi
+}
+
+start_supervisor(){
+	printf "\nStart Supervisord -c %s\n" "$SUPERVISOR_CONFIG"
+	mkdir -p /var/log/supervisor
+	exec supervisord -c "$SUPERVISOR_CONFIG"
+}
+
+help(){
+	printf "\nPrint help:"
+	printf "\n	docker run --rm gp3t1/tor-privoxy[:tag] [help]"
+	printf "\nConnect:"
+	printf "\n	docker run [--rm] [-d] --name=<my-tor-privoxy>"
+	printf "\n	           -e REFRESH=<true|false>"
+	printf "\n	           -p <http_proxy_port>:%s -p <socks5_proxy_port>:%s" "$HTTP_PORT" "$SOCKS_PORT"
+	printf "\n	           gp3t1/tor-privoxy[:tag] connect"
+	printf "\n 	set refresh to 'true' if you want to upgrade tor/privoxy at each start\n"
+}
+
+set_apps(){
+	config_tor && test_tor 30 || return 1
+	config_privoxy && test_privoxy || return 1
+}
+
+main(){
+	printNetwork
+	upgrade
+	case "$1" in
+		connect )
+			set_apps || exit 1
+			start_supervisor
+			;;
+		sh )
+			set_apps
+			printf "\n## Install docs...\n"
+			apk --no-cache add curl-doc privoxy-doc tor-doc@testing
+			exec /bin/sh
+			;;
+		help|* )
+			help
+			;;
+	esac
+}
+
+main "$@"
